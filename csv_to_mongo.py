@@ -56,62 +56,22 @@ def normalize_result(result):
         return 'draw'
     return None
 
-def initialize_move_node():
-    """Create a new move node with default statistics."""
+def generate_move_sequence_id(moves):
+    """Generate a unique ID for a move sequence."""
+    return "_".join(moves) if moves else "root"
+
+def initialize_move_stats():
+    """Initialize statistics for a move sequence."""
     return {
         "white_win": 0,
         "draw": 0,
         "black_win": 0,
-        "next": {}
+        "next_moves": set()  # Using set to avoid duplicates
     }
 
-def update_tree_statistics(tree, moves, result_type, max_depth=5):
-    """Update the tree with a sequence of moves and result."""
-    if not moves or max_depth <= 0:
-        return
-    
-    current_level = tree
-    for i, move in enumerate(moves[:max_depth]):
-        if move not in current_level:
-            current_level[move] = initialize_move_node()
-        
-        # Update statistics for this move
-        if result_type:
-            current_level[move][result_type] += 1
-        
-        # Move to next level
-        if i < len(moves) - 1 and i < max_depth - 1:
-            if "next" not in current_level[move]:
-                current_level[move]["next"] = {}
-            current_level = current_level[move]["next"]
-
-def calculate_percentages(tree):
-    """Calculate win percentages for all moves in the tree."""
-    for move, data in tree.items():
-        total_games = data["white_win"] + data["draw"] + data["black_win"]
-        
-        if total_games > 0:
-            data["white_win_rate"] = round(data["white_win"] / total_games * 100, 2)
-            data["draw_rate"] = round(data["draw"] / total_games * 100, 2)
-            data["black_win_rate"] = round(data["black_win"] / total_games * 100, 2)
-        else:
-            data["white_win_rate"] = data["draw_rate"] = data["black_win_rate"] = 0.0
-        
-        data["total_games"] = total_games
-        
-        # Recursively calculate for next moves
-        if "next" in data and data["next"]:
-            calculate_percentages(data["next"])
-
-def estimate_document_size(data):
-    """Rough estimate of BSON document size."""
-    import json
-    return len(json.dumps(data, separators=(',', ':')))
-
-def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_name="openings", batch_size=1000, max_depth=4):
+def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_name="openings", batch_size=1000, max_depth=6):
     """
-    Process CSV file and load directly into MongoDB with memory optimization.
-    Split into multiple documents to avoid 16MB BSON limit.
+    Process CSV file and create individual documents for each move sequence.
     """
     # Connect to MongoDB
     client = connect_to_mongo()
@@ -127,13 +87,13 @@ def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_nam
         print("Clearing existing data...")
         collection.drop()
         
-        # Initialize tree structure
-        opening_tree = {}
+        # Dictionary to store all move sequences and their statistics
+        move_sequences = defaultdict(initialize_move_stats)
         
         print(f"Processing CSV file: {csv_file_path}")
         print(f"Max depth: {max_depth}")
         
-        # Process CSV in batches
+        # Process CSV file
         processed_games = 0
         batch_count = 0
         
@@ -145,105 +105,149 @@ def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_nam
                 moves_string = get_moves_from_row(row)
                 moves = parse_moves(moves_string)
                 
-                if not moves:
+                if not moves or not result:
                     continue
                 
-                # Update tree with this game
-                update_tree_statistics(opening_tree, moves, result, max_depth)
+                # Process all subsequences of moves up to max_depth
+                for depth in range(1, min(len(moves) + 1, max_depth + 1)):
+                    subsequence = moves[:depth]
+                    sequence_id = generate_move_sequence_id(subsequence)
+                    
+                    # Update statistics for this subsequence
+                    move_sequences[sequence_id][result] += 1
+                    
+                    # Add next move if exists
+                    if depth < len(moves):
+                        next_move = moves[depth]
+                        move_sequences[sequence_id]["next_moves"].add(next_move)
                 
                 processed_games += 1
                 
-                # Print progress every batch_size games
+                # Print progress
                 if processed_games % batch_size == 0:
                     batch_count += 1
                     print(f"Processed {processed_games} games (batch {batch_count})")
         
         print(f"Total games processed: {processed_games}")
-        print("Calculating win percentages...")
+        print(f"Total move sequences found: {len(move_sequences)}")
         
-        # Calculate percentages for all moves
-        calculate_percentages(opening_tree)
+        # Convert to documents and insert into MongoDB
+        print("Preparing documents for MongoDB...")
         
-        print(f"Found {len(opening_tree)} different first moves")
+        documents = []
+        document_count = 0
         
-        # Insert documents separately for each first move
-        print("Inserting documents into MongoDB...")
+        for sequence_id, stats in move_sequences.items():
+            # Calculate percentages
+            total_games = stats["white_win"] + stats["draw"] + stats["black_win"]
+            
+            if total_games == 0:
+                continue
+            
+            # Parse move sequence from ID
+            move_sequence = sequence_id.split("_") if sequence_id != "root" else []
+
+            next_moves_list = []
+
+            for next_move in stats["next_moves"]:
+                # Create the sequence ID for this next move
+                next_sequence = move_sequence + [next_move]
+                next_sequence_id = generate_move_sequence_id(next_sequence)
+                
+                # Look up the statistics for this specific next move sequence
+                if next_sequence_id in move_sequences:
+                    next_move_stats = move_sequences[next_sequence_id]
+                    next_total_games = next_move_stats["white_win"] + next_move_stats["draw"] + next_move_stats["black_win"]
+                                        
+                    next_moves_list.append({
+                        "name": next_move,
+                        "white_win": next_move_stats["white_win"],
+                        "draw": next_move_stats["draw"],
+                        "black_win": next_move_stats["black_win"],
+                        "total_games": next_total_games,
+                    })
+            
+            # Sort next moves by total games (most popular first)
+            next_moves_list.sort(key=lambda x: x["total_games"], reverse=True)
+            
+            document = {
+                "_id": sequence_id,
+                "move_sequence": move_sequence,
+                "depth": len(move_sequence),
+                "white_win": stats["white_win"],
+                "draw": stats["draw"],
+                "black_win": stats["black_win"],
+                "total_games": total_games,
+                "next_moves": next_moves_list,  # Use the enriched list instead of just names
+            }
+            
+            documents.append(document)
+            document_count += 1
+            
+            # Insert in batches to avoid memory issues
+            if len(documents) >= 1000:
+                collection.insert_many(documents)
+                print(f"Inserted batch of {len(documents)} documents (total: {document_count})")
+                documents = []
         
-        # First, insert a summary document
+        # Insert remaining documents
+        if documents:
+            collection.insert_many(documents)
+            print(f"Inserted final batch of {len(documents)} documents")
+        
+        # Insert summary document
         summary_doc = {
             "_id": "summary",
-            "total_first_moves": len(opening_tree),
+            "total_move_sequences": document_count,
             "total_games_processed": processed_games,
             "max_depth": max_depth,
-            "created_at": "2024-01-01T00:00:00Z",
-            "first_moves": list(opening_tree.keys())
+            "created_at": "2024-01-01T00:00:00Z"
         }
         
         collection.insert_one(summary_doc)
         print("Inserted summary document")
         
-        # Then insert each first move as a separate document
-        inserted_count = 0
-        for first_move, move_data in opening_tree.items():
-            try:
-                document = {
-                    "_id": f"first_move_{first_move}",
-                    "first_move": first_move,
-                    "data": move_data,
-                    "created_at": "2024-01-01T00:00:00Z"
-                }
-                
-                # Check estimated size
-                estimated_size = estimate_document_size(document)
-                if estimated_size > 15000000:  # 15MB threshold
-                    print(f"Warning: Document for {first_move} is large ({estimated_size/1000000:.1f}MB), reducing depth...")
-                    # Reduce the tree depth for this move
-                    reduced_data = reduce_tree_depth(move_data, 2)
-                    document["data"] = reduced_data
-                
-                collection.insert_one(document)
-                inserted_count += 1
-                
-                if inserted_count % 5 == 0:
-                    print(f"Inserted {inserted_count}/{len(opening_tree)} first move documents")
-                
-            except Exception as e:
-                print(f"Error inserting document for {first_move}: {e}")
-                continue
-        
-        # Create indexes
+        # Create indexes for efficient querying
         print("Creating indexes...")
         try:
-            collection.create_index("first_move")
-            collection.create_index("data.total_games")
+            collection.create_index("move_sequence")
+            collection.create_index("depth")
+            collection.create_index("total_games")
+            collection.create_index([("depth", 1), ("total_games", -1)])  # Compound index
             print("Successfully created indexes")
         except Exception as e:
             print(f"Error creating indexes: {e}")
         
-        # Print statistics
+        # Print final statistics
         total_docs = collection.count_documents({})
         
         print("\nDatabase Statistics:")
         print(f"- Total documents: {total_docs}")
-        print(f"- First move documents: {inserted_count}")
+        print(f"- Move sequence documents: {document_count}")
         print(f"- Total games processed: {processed_games}")
         print(f"- Max depth: {max_depth}")
         print(f"- Database: {database_name}")
         print(f"- Collection: {collection_name}")
         
-        # Show top 5 first moves
-        if opening_tree:
-            first_moves_stats = []
-            for move, stats in opening_tree.items():
-                total_games = stats.get("total_games", 0)
-                first_moves_stats.append((move, total_games))
-            
-            first_moves_stats.sort(key=lambda x: x[1], reverse=True)
-            
-            print("\nTop 5 first moves by number of games:")
-            for move, count in first_moves_stats[:5]:
-                win_rate = opening_tree[move].get("white_win_rate", 0)
-                print(f"  {move}: {count} games (White win rate: {win_rate}%)")
+        # Show some example queries
+        print("\nExample move sequences:")
+        
+        # Most popular first moves
+        first_moves = list(collection.find(
+            {"depth": 1}, 
+            {"move_sequence": 1, "total_games": 1}
+        ).sort("total_games", -1).limit(5))
+        
+        print("\nTop 5 first moves by popularity:")
+        for doc in first_moves:
+            move = doc["move_sequence"][0]
+            games = doc["total_games"]
+        
+        # Example of accessing specific opening
+        e4_e5 = collection.find_one({"_id": "e4_e5"})
+        if e4_e5:
+            print(f"\nExample: e4 e5 opening")
+            print(f"  Total games: {e4_e5['total_games']:,}")
         
         return True
         
@@ -252,35 +256,11 @@ def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_nam
         return False
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
     finally:
         client.close()
-
-def reduce_tree_depth(tree, max_depth, current_depth=0):
-    """Reduce the depth of a tree to fit within size limits."""
-    if current_depth >= max_depth:
-        return {}
-    
-    reduced_tree = {}
-    for move, data in tree.items():
-        reduced_data = {
-            "white_win": data.get("white_win", 0),
-            "draw": data.get("draw", 0),
-            "black_win": data.get("black_win", 0),
-            "white_win_rate": data.get("white_win_rate", 0),
-            "draw_rate": data.get("draw_rate", 0),
-            "black_win_rate": data.get("black_win_rate", 0),
-            "total_games": data.get("total_games", 0)
-        }
-        
-        if "next" in data and current_depth < max_depth - 1:
-            reduced_data["next"] = reduce_tree_depth(data["next"], max_depth, current_depth + 1)
-        else:
-            reduced_data["next"] = {}
-        
-        reduced_tree[move] = reduced_data
-    
-    return reduced_tree
 
 def main():
     csv_file = 'reduce_csv/reduced_chess_games.csv'
@@ -288,12 +268,13 @@ def main():
     print("Chess Opening Tree CSV to MongoDB Loader")
     print("=" * 50)
     
-    # Reduced parameters to avoid BSON size limits
-    max_depth = 4  # Reduced depth
+    # Parameters
+    max_depth = 6  # Can handle deeper sequences now
     batch_size = 1000  # Progress reporting frequency
     
     success = process_csv_to_mongo(
-        csv_file, 
+        csv_file,
+        database_name="goapi",
         max_depth=max_depth, 
         batch_size=batch_size
     )
