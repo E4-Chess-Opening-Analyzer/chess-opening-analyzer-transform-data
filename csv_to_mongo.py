@@ -108,6 +108,11 @@ def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_nam
                 if not moves or not result:
                     continue
                 
+                # Add the first move to root's next moves
+                if moves:
+                    move_sequences["root"]["next_moves"].add(moves[0])
+                    move_sequences["root"][result] += 1  # Count all games in root
+
                 # Process all subsequences of moves up to max_depth
                 for depth in range(1, min(len(moves) + 1, max_depth + 1)):
                     subsequence = moves[:depth]
@@ -195,16 +200,6 @@ def process_csv_to_mongo(csv_file_path, database_name="chess_db", collection_nam
             collection.insert_many(documents)
             print(f"Inserted final batch of {len(documents)} documents")
         
-        # Insert summary document
-        summary_doc = {
-            "_id": "summary",
-            "total_move_sequences": document_count,
-            "total_games_processed": processed_games,
-            "max_depth": max_depth,
-            "created_at": "2024-01-01T00:00:00Z"
-        }
-        
-        collection.insert_one(summary_doc)
         print("Inserted summary document")
         
         # Create indexes for efficient querying
@@ -269,7 +264,7 @@ def main():
     print("=" * 50)
     
     # Parameters
-    max_depth = 6  # Can handle deeper sequences now
+    max_depth = 8  # Can handle deeper sequences now
     batch_size = 1000  # Progress reporting frequency
     
     success = process_csv_to_mongo(
