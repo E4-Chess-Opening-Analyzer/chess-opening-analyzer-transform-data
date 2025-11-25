@@ -6,8 +6,8 @@ from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
 def connect_to_mongo():
     """Connect to MongoDB using environment variables."""
-    mongo_uri = os.getenv('MONGO_URI', 'mongodb://admin:password123@mongo:27017/')
-    
+    mongo_uri = os.getenv('MONGO_URI', 'mongodb://root:rootpass@mongo:27017/')
+    print(f"Connecting to MongoDB at {mongo_uri}...")
     try:
         client = MongoClient(mongo_uri)
         # Test the connection

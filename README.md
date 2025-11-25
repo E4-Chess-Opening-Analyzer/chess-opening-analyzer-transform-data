@@ -11,7 +11,8 @@ The system processes chess game data to build a hierarchical opening tree that t
 ```
 .
 ├── csv_to_mongo.py          # Main script to load CSV data into MongoDB
-├── compose.yaml             # Docker Compose configuration
+├── compose.yaml             # Docker Compose configuration*
+├── compose.test.yaml        # Docker Compose configuration**
 ├── Dockerfile               # Python application container
 ├── requirements.txt         # Python dependencies
 ├── .env                     # Environment variables
@@ -21,13 +22,14 @@ The system processes chess game data to build a hierarchical opening tree that t
     ├── reduced_chess_games.csv # Processed CSV with essential data
     └── README.md            # CSV processing documentation
 ```
+* This ```compose.yml``` requires to have the API's database running in the background
+** Used to test the script without needing to have the API's database running in the backgroud
 
 ## Features
 
 - **Memory Efficient Processing**: Processes large CSV files without loading everything into memory
 - **Opening Tree Generation**: Creates hierarchical chess opening trees with statistics
 - **Multiple Document Storage**: Splits data across multiple MongoDB documents to avoid 16MB BSON limits
-- **Win Rate Calculations**: Automatically calculates win percentages for each move
 - **Configurable Depth**: Adjustable tree depth to manage memory and document size
 - **Progress Reporting**: Real-time processing progress updates
 
@@ -43,29 +45,33 @@ Each first move is stored as a separate document:
 
 ```json
 {
-  "_id": "first_move_e4",
-  "first_move": "e4",
-  "data": {
-    "white_win": 1250000,
-    "draw": 800000,
-    "black_win": 950000,
-    "white_win_rate": 41.67,
-    "draw_rate": 26.67,
-    "black_win_rate": 31.67,
-    "total_games": 3000000,
-    "next": {
-      "e5": {
-        "white_win": 520000,
-        "draw": 350000,
-        "black_win": 430000,
-        "white_win_rate": 40.0,
-        "draw_rate": 26.92,
-        "black_win_rate": 33.08,
-        "total_games": 1300000,
-        "next": { ... }
-      }
-    }
-  }
+    _id: "d4_d5",
+    move_sequence: [
+        "d4",
+        "d5"
+    ],
+    depth: 2,
+    white_win: 336018,
+    draw: 25728,
+    black_win: 277376,
+    total_games: 639122,
+    next_moves: [
+        {
+            name: "c4",
+            white_win: 159871,
+            draw: 11684,
+            black_win: 118761,
+            total_games: 290316
+        },
+        {
+            name: "Nf3",
+            white_win: 58748,
+            draw: 4715,
+            black_win: 46527,
+            total_games: 109990
+        },
+        ...
+    ]
 }
 ```
 
@@ -89,27 +95,43 @@ A summary document tracks overall statistics:
 ### Environment Variables
 Configure these in your `.env` file:
 ```env
-MONGO_URI=mongodb://admin:password123@mongo:27017/
-MONGO_INITDB_ROOT_USERNAME=admin
-MONGO_INITDB_ROOT_PASSWORD=password123
+MONGO_URI=mongodb://root:rootpass@mongo:27017/
+MONGO_INITDB_ROOT_USERNAME=root
+MONGO_INITDB_ROOT_PASSWORD=rootpass
 ```
 
 ### Running the Application
 
-1. **Start the services**:
-   ```bash
-   docker compose up -d
-   ```
+You can run the loader in two modes depending on whether you want a local MongoDB for testing or to attach the loader to an existing stack/network.
 
-2. **Process your CSV data**:
-   Place your `reduced_chess_games.csv` in the `reduce_csv/` folder and run:
-   ```bash
-   docker compose up python
-   ```
+Option A — Local (recommended for development/testing)
 
-3. **Access MongoDB**:
-   - MongoDB: `localhost:27017`
-   - Mongo Express (Web UI): `http://localhost:8081`
+This starts a local MongoDB (`database`) and `mongo-express` alongside the `python` loader. It uses `compose.test.yaml` which includes a `database` service and healthchecks.
+
+1. Ensure your `.env` contains the credentials and `MONGO_URI` (the example `.env` in the repo is suitable for local runs).
+
+2. Start the local stack:
+
+```bash
+docker compose -f compose.test.yaml up
+```
+
+3. Access services locally:
+
+- MongoDB: `localhost:27017`
+- Mongo Express (Web UI): `http://localhost:8081`
+
+Option B — External network / attach to existing stack
+
+Use this when you have a running the API from the api repository and want the loader to join that network. `compose.yaml` attaches the `python` service to the external Docker network named `go-api-network`.
+
+1. Make sure your `.env` `MONGO_URI` points to the correct hostname that is reachable on `go-api-network` (for example `mongodb://root:rootpass@database:27017/?authSource=admin` if the Mongo container on that network is named `database`).
+
+2. Start only the `python` service attached to the external network:
+
+```bash
+docker compose -f compose.yaml up
+```
 
 ### Configuration Options
 
@@ -119,34 +141,3 @@ You can modify the processing parameters in [`csv_to_mongo.py`](csv_to_mongo.py)
 - `batch_size`: Progress reporting frequency (default: 1000)
 - Database and collection names
 
-## Data Processing Pipeline
-
-1. **CSV Reading**: Reads chess game data from CSV file
-2. **Move Parsing**: Extracts and parses chess moves from JSON format
-3. **Tree Building**: Builds hierarchical opening tree with move statistics
-4. **Percentage Calculation**: Computes win rates for each move
-5. **Document Splitting**: Splits large trees into manageable MongoDB documents
-6. **Database Storage**: Stores documents in MongoDB with proper indexing
-
-## Services
-
-### Python Application
-- **Image**: Python 3.9 slim
-- **Memory**: 2GB limit, 1GB reservation
-- **Function**: Processes CSV and loads data into MongoDB
-
-### MongoDB
-- **Image**: MongoDB latest
-- **Port**: 27017
-- **Health Check**: Automatic connection verification
-- **Storage**: Persistent volume for data
-
-### Mongo Express
-- **Image**: Mongo Express latest
-- **Port**: 8081
-- **Function**: Web-based MongoDB administration interface
-
-## Performance Considerations
-
-- **Memory Usage**: Configurable memory limits prevent out-of-memory errors
-- **Document Size**: Automatic splitting prevents BSON size
